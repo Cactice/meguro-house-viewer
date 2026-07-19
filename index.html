@@ -2,7 +2,6 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>meguro-house floor editor</title>
 <style>
   :root {
@@ -28,15 +27,6 @@
   #panel3d select { background: #333; color: var(--text); border: 1px solid #555; font-size: 12px; }
   #err { color: #e74c3c; padding: 4px 10px; font-size: 12px; white-space: pre; background: var(--panel); }
   #err:empty { display: none; }
-  /* mobile: stack views on top, editor below */
-  @media (max-width: 700px) {
-    main { flex-direction: column; }
-    .views { order: 0; flex: 1 1 60%; min-height: 0; }
-    .editors { order: 1; width: 100%; min-width: 0; flex: 1 1 40%; min-height: 120px; }
-    #preview { padding: 8px; }
-    #preview svg { max-width: 100%; height: auto; }
-    header { flex-wrap: wrap; }
-  }
 </style>
 </head>
 <body>
@@ -529,7 +519,7 @@ async function build3d(doc, belowDoc = null) {
 }
 
 // --- rendering mode panel (bottom-right of the 3D view) ---
-let renderMode = "quality";
+let renderMode = "fast";
 let pathTracer = null, rtReady = false;
 
 async function initPathTracer() {
@@ -580,6 +570,7 @@ controls.addEventListener("change", () => {
   sel.value = renderMode;
   sel.onchange = () => { renderMode = sel.value; applyRenderMode(); };
   panel.append(label, sel);
+  applyRenderMode(); // start in the default mode
 }
 
 // --- UI wiring ---
