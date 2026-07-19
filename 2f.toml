@@ -1,0 +1,110 @@
+[config]
+unit = 445          # mm per grid cell
+wall_height = 2400  # mm
+wall_thickness = 90 # mm
+slab = 150          # floor slab mm
+
+[grid]
+zone = """
+　🟥🟥🟧🟧⬛⬛️⬛️⬛️️🟨🟨🟨🟨
+　🟥🟥🟧🟧⬛️⬛️⬛️⬛️🟨🟨🟨🟨
+　🟥🟥⬜⬜⬜⬜🟫🟫🟫🟫🟫🟫
+　🟥🟥⬜⬜⬜⬜🟫🟫🟫🟫🟫🟫
+　🟨🟨🟨🟨⬜⬜🟫🟫🟫🟫🟫🟫
+　🟨🟨🟨🟨⬜⬜🟫🟫🟫🟫🟫🟫
+🟦🟦🟦🟦🟦⬜⬜🟫🟫🟫🟫🟫🟫
+🟦🟦🟦🟦🟦⬜⬜🟫🟫🟫🟫🟫🟫
+🟦🟦🟦🟦🟦🟪🟪🟪🟪🟪🟪🟪🟪
+🟦🟦🟦🟦🟦🟪🟪🟪🟪🟪🟪🟪🟪
+🟦🟦🟦🟦🟦🟪🟪🟪🟪🟪🟪🟪🟪
+🟦🟦🟦🟦🟦🟪🟪🟪🟪🟪🟪🟪🟪
+🟦🟦🟦🟦🟦🟪🟪🟪🟪🟪🟪🟪🟪
+🟦🟦🟦🟦🟦🟪🟪🟪🟪🟪🟪🟪🟪
+"""
+
+walls = """
+　⚫⚫⚫🔵🔵⚫⚫⚫⚫⚫⚫⚫⚫
+　⚫　⚫　　　　　⚫　　　⚫
+　⚫　⚫　　⚫⚫⚫⚫　　　⚫
+　🔵　⚪　　　⚪　　　　　🔵
+　⚫⚫⚫⚫⚫　⚫　　　　　🔵
+　⚫　　　⚫　⚫　　　　　🔵
+⚫⚫　　　⚫　⚫　　　　　⚫
+⚫　　　　⚪　⚫　　　　　⚫
+⚫　　　　⚫⚪⚫⚫⚫⚫⚫⚫⚫
+⚫　　　　⚫　　　　　　　🟣
+⚫　　　　⚫　　　　　　　🟣
+🔵　　　　⚫　　　　　　　🟣
+🔵　　　　⚫　　　　　　　⚫
+🔵　　　　⚫　　　　　　　⚫
+⚫⚫🔵🔵🔵⚫⚫⚫🔵🔵🔵⚫⚫⚫
+"""
+
+[zones."　"]
+name = "外"
+color = "#888"
+outside = true
+
+[zones."🟥"]
+name = "トイレ"
+color = "#e74c3c"
+
+[zones."🟧"]
+name = "階段"
+color = "#e67e22"
+hole = true                                              # no slab — stairs from below poke up to this floor level
+stair = { direction = "left", height = 100, steps = 2 }
+
+[zones."⬛"]
+name = "階段2"
+color = "#333"
+hole = true  # pure opening, nothing drawn
+
+[zones."⬜"]
+name = "廊下"
+color = "#dfe6e9"
+
+[zones."🟦"]
+name = "洋室1"
+color = "#3498db"
+
+[zones."🟪"]
+name = "洋室2"
+color = "#9b59b6"
+
+[zones."🟫"]
+name = "洋室3"
+color = "#a0522d"
+
+[zones."🟨"]
+name = "クローゼット"
+color = "#f1c40f"
+
+[walls."　"]
+kind = "open"
+
+[walls."⚫"]
+kind = "wall"
+
+[walls."⚪"]
+kind = "door"
+top = 2000
+door = "hinged" # or "sliding"; omit for plain opening
+hinge = "left"  # 吊元(画面基準): 横壁 "left"/"right"、縦壁 "up"/"down"
+opens = "up"    # 開く向き(画面基準): 横壁 "up"/"down"、縦壁 "left"/"right"
+
+[walls."🔵"]
+kind = "window"
+bottom = 900
+top = 2000
+
+[walls."🟣"]
+kind = "tall_window"
+bottom = 0
+top = 2000
+
+# --- fixtures: GLB models anchored to zone emojis ---
+[[fixtures]]
+path = "assets/toilet-amage/toilet-amage.glb"
+offset = [0, -1]
+zone = "🟥"

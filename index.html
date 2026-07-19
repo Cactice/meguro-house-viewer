@@ -1,0 +1,686 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>meguro-house floor editor</title>
+<style>
+  :root {
+    --bg: #1e1e1e; --panel: #252526; --text: #ddd; --accent: #5dade2;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: ui-monospace, Menlo, monospace; background: var(--bg); color: var(--text); display: flex; flex-direction: column; height: 100vh; }
+  header { display: flex; gap: 8px; align-items: center; padding: 6px 10px; background: var(--panel); }
+  header button { background: #333; color: var(--text); border: 1px solid #444; padding: 4px 12px; cursor: pointer; }
+  header button.active { background: var(--accent); color: #000; }
+  header .spacer { flex: 1; }
+  main { flex: 1; display: flex; min-height: 0; }
+  .editors { width: 40%; display: flex; flex-direction: column; min-width: 280px; }
+  .cm-wrap { flex: 1; overflow: auto; }
+  .cm-editor { height: 100%; font-size: 15px; }
+  .views { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #preview { flex: 1; overflow: auto; background: #fff; display: flex; align-items: flex-start; justify-content: center; padding: 20px; min-height: 0; }
+  #view3d { flex: 1; min-height: 0; position: relative; }
+  #view3d canvas { position: absolute; inset: 0; }
+  #panel3d { position: absolute; z-index: 10; right: 8px; bottom: 8px; background: rgba(30,30,30,0.85); padding: 8px 10px; font-size: 12px; border: 1px solid #444; border-radius: 4px; max-height: 60%; overflow-y: auto; }
+  #panel3d .row { display: flex; align-items: center; gap: 6px; margin: 2px 0; }
+  #panel3d .row span { min-width: 90px; }
+  #panel3d select { background: #333; color: var(--text); border: 1px solid #555; font-size: 12px; }
+  #err { color: #e74c3c; padding: 4px 10px; font-size: 12px; white-space: pre; background: var(--panel); }
+  #err:empty { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <button id="tab1f" class="active">1f.toml</button>
+  <button id="tab2f">2f.toml</button>
+  <span class="spacer"></span>
+  <span id="dirStatus"></span>
+  <button id="reload" title="re-read files from disk">reload</button>
+  <button id="save" title="write current file (:w)">save</button>
+  <button id="openDir">open folder</button>
+</header>
+<main>
+  <div class="editors">
+    <div class="cm-wrap" id="ed"></div>
+  </div>
+  <div class="views">
+    <div id="preview"></div>
+    <div id="view3d"><div id="panel3d"></div></div>
+  </div>
+</main>
+<div id="err"></div>
+
+<script type="module">
+import { basicSetup, EditorView } from "https://esm.sh/codemirror@6.0.1";
+import { vim, Vim } from "https://esm.sh/@replit/codemirror-vim@6.2.1";
+import { parse as parseToml } from "https://esm.sh/smol-toml@1.3.1";
+import * as THREE from "https://esm.sh/three@0.170.0";
+import { OrbitControls } from "https://esm.sh/three@0.170.0/examples/jsm/controls/OrbitControls.js";
+import { GLTFLoader } from "https://esm.sh/three@0.170.0/examples/jsm/loaders/GLTFLoader.js";
+import { RoomEnvironment } from "https://esm.sh/three@0.170.0/examples/jsm/environments/RoomEnvironment.js";
+
+const C = 44.5;
+const px = n => n * C;
+
+function parseGrid(s) {
+  const grid = s.split("\n")
+    .map(l => [...l].filter(c => c !== "️"))
+    .filter(r => r.length);
+  if (!grid.length) throw new Error("empty grid");
+  const cols = grid[0].length;
+  grid.forEach((r, i) => {
+    if (r.length !== cols) throw new Error(`row ${i + 1} has ${r.length} cells, expected ${cols}`);
+  });
+  return grid;
+}
+
+function zoneRects(g) {
+  const rows = g.length, cols = g[0].length;
+  const vis = g.map(r => r.map(() => false));
+  const out = [];
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    if (vis[r][c]) continue;
+    const e = g[r][c];
+    let rw = 1;
+    while (c + rw < cols && g[r][c + rw] === e && !vis[r][c + rw]) rw++;
+    let rh = 1;
+    down: while (r + rh < rows) {
+      for (let dc = 0; dc < rw; dc++)
+        if (g[r + rh][c + dc] !== e || vis[r + rh][c + dc]) break down;
+      rh++;
+    }
+    for (let dr = 0; dr < rh; dr++) for (let dc = 0; dc < rw; dc++) vis[r + dr][c + dc] = true;
+    out.push([r, c, rw, rh, e]);
+  }
+  return out;
+}
+
+// Merge touching collinear intervals: [fixed, start, end]
+function merge(segs) {
+  if (!segs.length) return [];
+  segs.sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2]);
+  const out = [segs[0]];
+  for (const s of segs.slice(1)) {
+    const last = out[out.length - 1];
+    if (s[0] === last[0] && s[1] <= last[2]) last[2] = Math.max(last[2], s[2]);
+    else out.push(s);
+  }
+  return out;
+}
+
+// Openings (door/window) claim as much of the shared edge with a wall cell as
+// possible WITHOUT colliding: full edge normally, half when another opening sits
+// on the far side of that wall cell. 🔵⚫🔵 stays two windows; ⚫🔵⚫ spans 2 cells.
+function segments(w, defs) {
+  const rows = w.length, cols = w[0].length;
+  const solid = c => defs[c].kind !== "open";
+  const opening = e => e != null && solid(e) && defs[e].kind !== "wall";
+  const buckets = {}; // emoji -> [horizontal[], vertical[]]
+  const push = (e, i, seg) => ((buckets[e] ??= [[], []])[i].push(seg));
+  const half = (a, b, i, fixed, lo) => {
+    push(a, i, [fixed, lo, lo + 0.5]);
+    push(b, i, [fixed, lo + 0.5, lo + 1]);
+  };
+  const edge = (prev, a, b, next, i, fixed, lo) => {
+    if (a === b) return push(a, i, [fixed, lo, lo + 1]);
+    if (opening(a) && !opening(b))
+      return opening(next) ? half(a, b, i, fixed, lo) : push(a, i, [fixed, lo, lo + 1]);
+    if (opening(b) && !opening(a))
+      return opening(prev) ? half(a, b, i, fixed, lo) : push(b, i, [fixed, lo, lo + 1]);
+    half(a, b, i, fixed, lo);
+  };
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols - 1; c++)
+    if (solid(w[r][c]) && solid(w[r][c + 1]))
+      edge(c > 0 ? w[r][c - 1] : null, w[r][c], w[r][c + 1], c + 2 < cols ? w[r][c + 2] : null, 0, r, c);
+  for (let c = 0; c < cols; c++) for (let r = 0; r < rows - 1; r++)
+    if (solid(w[r][c]) && solid(w[r + 1][c]))
+      edge(r > 0 ? w[r - 1][c] : null, w[r][c], w[r + 1][c], r + 2 < rows ? w[r + 2][c] : null, 1, c, r);
+  const out = [];
+  for (const [e, [h, v]] of Object.entries(buckets)) {
+    for (const [y, x1, x2] of merge(h)) out.push([x1, y, x2, y, e]);
+    for (const [x, y1, y2] of merge(v)) out.push([x, y1, x, y2, e]);
+  }
+  return out;
+}
+
+// doc = parsed TOML: { grid: {zone, walls}, zones: { "🟧": {name, color, stair?} } }
+function loadDoc(tomlText) {
+  const doc = parseToml(tomlText);
+  const zone = parseGrid(doc.grid.zone);
+  const walls = parseGrid(doc.grid.walls);
+  const zones = doc.zones ?? {};
+  for (const row of zone) for (const e of row)
+    if (!zones[e]?.color) throw new Error(`no [zones."${e}"] color in toml`);
+  // opening height defaults (mm) per kind; bottom/top overridable per emoji
+  const OPENING_DEFAULTS = {
+    door: { bottom: 0, top: 2000 },
+    window: { bottom: 900, top: 2000 },
+    tall_window: { bottom: 0, top: 2000 },
+  };
+  const wallDefs = Object.fromEntries(
+    Object.entries(doc.walls ?? {}).map(([k, v]) =>
+      [[...k].find(c => c !== "️"), { ...OPENING_DEFAULTS[v.kind], ...v }]));
+  for (const row of walls) for (const e of row)
+    if (wallDefs[e] === undefined) throw new Error(`no [walls."${e}"] kind in toml`);
+  const cfg = { unit: 445, wall_height: 2400, wall_thickness: 90, slab: 150, ...(doc.config ?? {}) };
+  return { zone, walls, zones, wallDefs, fixtures: doc.fixtures ?? [], cfg };
+}
+
+// door plan notation: hinged = leaf + quarter arc, sliding = offset leaf line.
+// All directions are screen directions in the plan view.
+// def.door: "hinged" | "sliding" (absent -> dashed opening)
+// def.hinge: hinge end — "left"/"right" for horizontal walls, "up"/"down" for vertical
+// def.opens: direction the leaf swings into — "up"/"down" (horizontal walls), "left"/"right" (vertical)
+const DIR = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] };
+
+function doorSvg(x1, y1, x2, y2, def) {
+  const base = `  <line x1="${px(x1)}" y1="${px(y1)}" x2="${px(x2)}" y2="${px(y2)}" stroke="#666" stroke-width="2" stroke-dasharray="6,4"/>\n`;
+  const [p0, p1] = [[px(x1), px(y1)], [px(x2), px(y2)]];
+  const L = Math.hypot(p1[0] - p0[0], p1[1] - p0[1]);
+  if (!def.door || !L) return base;
+  const horizontal = y1 === y2;
+  // segment start is min-x (horizontal) / min-y (vertical) = screen left / screen top
+  const hingeAtEnd = def.hinge === (horizontal ? "right" : "down");
+  const [hp, jp] = hingeAtEnd ? [p1, p0] : [p0, p1];
+  const d = [(jp[0] - hp[0]) / L, (jp[1] - hp[1]) / L];
+  const n = DIR[def.opens] ?? (horizontal ? DIR.up : DIR.right);
+  if (def.door === "sliding") {
+    const o = 6;
+    return base + `  <line x1="${hp[0] + n[0] * o}" y1="${hp[1] + n[1] * o}" x2="${jp[0] + n[0] * o - d[0] * L / 2}" y2="${jp[1] + n[1] * o - d[1] * L / 2}" stroke="#333" stroke-width="3"/>\n`;
+  }
+  const tip = [hp[0] + n[0] * L, hp[1] + n[1] * L];
+  const sweep = d[0] * n[1] - d[1] * n[0] < 0 ? 1 : 0;
+  return base
+    + `  <line x1="${hp[0]}" y1="${hp[1]}" x2="${tip[0]}" y2="${tip[1]}" stroke="#333" stroke-width="3"/>\n`
+    + `  <path d="M ${jp[0]} ${jp[1]} A ${L} ${L} 0 0 ${sweep} ${tip[0]} ${tip[1]}" stroke="#999" stroke-width="1" fill="none"/>\n`;
+}
+
+// shrink a segment by t (grid units) at both ends; null if nothing remains
+function insetSeg(x1, y1, x2, y2, t) {
+  if (y1 === y2) return x2 - x1 > 2 * t ? [x1 + t, y1, x2 - t, y2] : null;
+  return y2 - y1 > 2 * t ? [x1, y1 + t, x2, y2 - t] : null;
+}
+
+function renderSvg({ zone, walls, zones, wallDefs, cfg }) {
+  const tIn = cfg.wall_thickness / cfg.unit / 2; // opening inset: half wall thickness per end
+  const [w, h] = [px(zone[0].length), px(zone.length)];
+  // white-based plan: rooms white, outside light gray, thin zone boundaries
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<g id="zone">\n`;
+  const rects = zoneRects(zone);
+  for (const [r, c, rw, rh, e] of rects) {
+    const fill = zones[e].outside ? "#eee" : zones[e].hole ? "#f7f7f7" : "#fff";
+    svg += `  <rect x="${px(c)}" y="${px(r)}" width="${px(rw)}" height="${px(rh)}" fill="${fill}" stroke="#ddd" stroke-width="1"/>\n`;
+  }
+  svg += `</g>\n<g id="walls" stroke-linecap="square" fill="none">\n`;
+  for (const [sx1, sy1, sx2, sy2, e] of segments(walls, wallDefs)) {
+    const k = wallDefs[e].kind;
+    if (k === "wall") {
+      svg += `  <line x1="${px(sx1)}" y1="${px(sy1)}" x2="${px(sx2)}" y2="${px(sy2)}" stroke="#1a1a1a" stroke-width="2"/>\n`;
+      continue;
+    }
+    // opening clear width = span - wall_thickness per end (jambs render as wall)
+    const inset = insetSeg(sx1, sy1, sx2, sy2, tIn);
+    if (!inset) {
+      svg += `  <line x1="${px(sx1)}" y1="${px(sy1)}" x2="${px(sx2)}" y2="${px(sy2)}" stroke="#1a1a1a" stroke-width="2"/>\n`;
+      continue;
+    }
+    const [x1, y1, x2, y2] = inset;
+    svg += `  <line x1="${px(sx1)}" y1="${px(sy1)}" x2="${px(x1)}" y2="${px(y1)}" stroke="#1a1a1a" stroke-width="2"/>\n`
+         + `  <line x1="${px(x2)}" y1="${px(y2)}" x2="${px(sx2)}" y2="${px(sy2)}" stroke="#1a1a1a" stroke-width="2"/>\n`;
+    if (k === "door")
+      svg += `  <line x1="${px(x1)}" y1="${px(y1)}" x2="${px(x2)}" y2="${px(y2)}" stroke="#666" stroke-width="2" stroke-dasharray="6,4"/>\n`;
+    else {
+      const [fill, stroke] = k === "tall_window" ? ["#0b03fe", "#a42ec1"] : ["#d6eaf8", "#5dade2"];
+      const t = 5;
+      const [rx, ry, rw, rh] = y1 === y2
+        ? [px(x1), px(y1) - t, px(x2) - px(x1), t * 2]
+        : [px(x1) - t, px(y1), t * 2, px(y2) - px(y1)];
+      svg += `  <rect x="${rx}" y="${ry}" width="${rw}" height="${rh}" fill="${fill}" stroke="${stroke}" stroke-width="1"/>\n`;
+    }
+  }
+  // zone name labels: one per emoji, centered on its largest rect
+  svg += `</g>\n<g id="labels" font-family="sans-serif" font-size="13" fill="#555" text-anchor="middle">\n`;
+  const best = {};
+  for (const [r, c, rw, rh, e] of rects) {
+    if (zones[e].outside) continue;
+    if (!best[e] || rw * rh > best[e][2] * best[e][3]) best[e] = [r, c, rw, rh];
+  }
+  for (const [e, [r, c, rw, rh]] of Object.entries(best)) {
+    const name = zones[e].name ?? "";
+    if (name) svg += `  <text x="${px(c + rw / 2)}" y="${px(r + rh / 2) + 4}">${name}</text>\n`;
+  }
+  return svg + `</g>\n</svg>\n`;
+}
+
+// --- 3D view (three.js) — real proportions, dimensions from [config] ---
+let MM = 1 / 445, T, H, SLAB;
+function setDims(cfg) {
+  MM = 1 / cfg.unit;
+  T = cfg.wall_thickness * MM;
+  H = cfg.wall_height * MM;
+  SLAB = cfg.slab * MM;
+}
+
+const view3d = document.getElementById("view3d");
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x2a2a2e);
+const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 500);
+camera.position.set(18, 16, 18);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+view3d.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+// image-based environment lighting for PBR materials
+const envTex = new THREE.PMREMGenerator(renderer)
+  .fromScene(new RoomEnvironment(), 0.04).texture;
+scene.environment = envTex;
+
+// equirect gradient sky for the path tracer (it can't sample PMREM render targets)
+function makeEquirectEnv() {
+  const w = 64, h = 32, data = new Float32Array(w * h * 4);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const t = y / (h - 1); // 0 = top of sky
+    const v = t < 0.55 ? 2.2 - t : 0.55; // bright sky, dim ground
+    const i = (y * w + x) * 4;
+    data[i] = v; data[i + 1] = v; data[i + 2] = v * 1.05; data[i + 3] = 1;
+  }
+  const tex = new THREE.DataTexture(data, w, h, THREE.RGBAFormat, THREE.FloatType);
+  tex.mapping = THREE.EquirectangularReflectionMapping;
+  tex.needsUpdate = true;
+  return tex;
+}
+const rtEnv = makeEquirectEnv();
+const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+sun.position.set(14, 24, 8);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.left = sun.shadow.camera.bottom = -20;
+sun.shadow.camera.right = sun.shadow.camera.top = 20;
+sun.shadow.bias = -0.0004;
+scene.add(sun);
+const ambient = new THREE.AmbientLight(0xffffff, 0.15);
+scene.add(ambient);
+const model3d = new THREE.Group();
+scene.add(model3d);
+
+function resize3d() {
+  const { clientWidth: w, clientHeight: h } = view3d;
+  if (!w || !h) return;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize3d).observe(view3d);
+renderer.setAnimationLoop(() => {
+  controls.update();
+  if (renderMode === "rt" && rtReady) pathTracer.renderSample();
+  else renderer.render(scene, camera);
+});
+
+let buildGroup = null; // floor group currently being built
+
+function addBox(x0, x1, y0, y1, z0, z1, material) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(x1 - x0, y1 - y0, z1 - z0), material);
+  m.position.set((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2);
+  m.castShadow = m.receiveShadow = true;
+  buildGroup.add(m);
+}
+
+const wallMat = new THREE.MeshStandardMaterial({ color: 0xf0ece2, roughness: 0.95 });
+const glassMat = new THREE.MeshStandardMaterial({ color: 0x9fd8f5, transparent: true, opacity: 0.3, roughness: 0.1, metalness: 0.2 });
+
+// floor textures: default wood, overridable per zone with `floor = "path.jpg"`
+const DEFAULT_FLOOR_TEX = "assets/textures/wood_floor.jpg";
+const texCache = new Map(); // path -> Promise<THREE.Texture>
+function getTex(path) {
+  if (!texCache.has(path)) {
+    texCache.set(path, (async () => {
+      const tex = await new THREE.TextureLoader().loadAsync(await assetUrl(path));
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.colorSpace = THREE.SRGBColorSpace;
+      return tex;
+    })());
+  }
+  return texCache.get(path);
+}
+
+async function loadFloorTextures(docs) {
+  const paths = new Set([DEFAULT_FLOOR_TEX]);
+  for (const doc of docs) for (const meta of Object.values(doc.zones))
+    if (meta.floor && !meta.floor.startsWith("#")) paths.add(meta.floor); // "#rgb" = flat color, no texture
+  const entries = await Promise.all(
+    [...paths].map(async p => [p, await getTex(p).catch(() => null)]));
+  return Object.fromEntries(entries);
+}
+
+function floorMat(tex, rw, rh, fallbackColor) {
+  if (!tex) return new THREE.MeshStandardMaterial({ color: new THREE.Color(fallbackColor), roughness: 0.7 });
+  const t = tex.clone();
+  t.needsUpdate = true;
+  t.repeat.set(rw / 2, rh / 2); // one texture tile per 2 cells (~890mm)
+  return new THREE.MeshStandardMaterial({ map: t, roughness: 0.65 });
+}
+
+// stair.direction: ascending toward "left" | "right" | "up" | "down" (plan view)
+// yOff shifts the whole run (a hole zone descends: top step lands at floor level)
+function addStairs(r, c, rw, rh, stair, mat, yOff = 0) {
+  const top = (stair.height ?? H / MM) * MM;
+  const dir = stair.direction ?? "left";
+  const horizontal = dir === "left" || dir === "right";
+  const span = horizontal ? rw : rh;
+  const steps = stair.steps ?? 12, rise = top / steps, tread = span / steps;
+  for (let i = 0; i < steps; i++) {
+    const lo = i * tread, hi = (i + 1) * tread, y1 = yOff + (i + 1) * rise;
+    if (dir === "left") addBox(c + rw - hi, c + rw - lo, yOff, y1, r, r + rh, mat);
+    if (dir === "right") addBox(c + lo, c + hi, yOff, y1, r, r + rh, mat);
+    if (dir === "up") addBox(c, c + rw, yOff, y1, r + rh - hi, r + rh - lo, mat);
+    if (dir === "down") addBox(c, c + rw, yOff, y1, r + lo, r + hi, mat);
+  }
+}
+
+// --- fixture GLBs referenced from [[fixtures]] in the toml ---
+const gltfLoader = new GLTFLoader();
+const glbCache = new Map(); // path -> Promise<THREE.Group> (normalized template)
+
+async function assetUrl(path) {
+  if (dir) { // resolve through the opened folder, works on file://
+    let h = dir;
+    const parts = path.split("/");
+    for (const part of parts.slice(0, -1)) h = await h.getDirectoryHandle(part);
+    const file = await (await h.getFileHandle(parts[parts.length - 1])).getFile();
+    return URL.createObjectURL(file);
+  }
+  return path; // relative fetch when served over http
+}
+
+function loadGlb(path) {
+  if (!glbCache.has(path)) {
+    glbCache.set(path, (async () => {
+      const gltf = await gltfLoader.loadAsync(await assetUrl(path));
+      // model units are mm with origin at footprint center (baked by xvl2glb.py)
+      return gltf.scene;
+    })());
+  }
+  return glbCache.get(path);
+}
+
+let build3dGen = 0;
+let camInitialized = false; // center the orbit target only on the first successful build
+
+// bounding-box center of every cell of an emoji in the zone grid
+function zoneCenter(zone, emojiRaw) {
+  const emoji = [...emojiRaw].find(c => c !== "️"); // grid cells have U+FE0F stripped
+  let minR = Infinity, maxR = -1, minC = Infinity, maxC = -1;
+  zone.forEach((row, r) => row.forEach((e, c) => {
+    if (e !== emoji) return;
+    minR = Math.min(minR, r); maxR = Math.max(maxR, r);
+    minC = Math.min(minC, c); maxC = Math.max(maxC, c);
+  }));
+  if (maxR < 0) throw new Error(`fixture zone ${emoji} not in zone grid`);
+  return [(minC + maxC + 1) / 2, (minR + maxR + 1) / 2];
+}
+
+function placeFixtures(fixtures, zone, group, mm, yBase) {
+  const gen = build3dGen;
+  for (const f of fixtures) {
+    loadGlb(f.path).then(tpl => {
+      if (gen !== build3dGen) return; // a newer rebuild happened
+      const inst = tpl.clone(true);
+      inst.traverse(o => { if (o.isMesh) o.castShadow = o.receiveShadow = true; });
+      inst.scale.setScalar(mm);
+      inst.rotation.y = (f.rotate ?? 0) * Math.PI / 180;
+      const [ax, az] = f.zone ? zoneCenter(zone, f.zone) : [0, 0];
+      const [ox, oz] = f.offset ?? [0, 0];
+      inst.position.set(ax + ox, yBase + (f.lift ?? 0) * mm, az + oz);
+      group.add(inst);
+    }).catch(e => { console.warn(`fixture ${f.path}:`, e); }); // missing assets: skip quietly
+  }
+}
+
+// build one floor's geometry into a group (uses dims set by setDims)
+function buildFloor({ zone, walls, zones, wallDefs, fixtures }, texs) {
+  placeFixtures(fixtures, zone, buildGroup, MM, SLAB);
+  for (const [r, c, rw, rh, e] of zoneRects(zone)) {
+    const meta = zones[e];
+    if (meta.outside) continue;
+    const mat = new THREE.MeshStandardMaterial({ color: new THREE.Color(meta.color), roughness: 0.8 });
+    const flat = meta.floor?.startsWith("#") ? meta.floor : null;
+    const zoneTex = flat ? null : texs[meta.floor ?? DEFAULT_FLOOR_TEX];
+    const stairMat = floorMat(zoneTex, 1, 1, flat ?? meta.color);
+    if (meta.hole) {
+      // stairwell: no slab; with a stair table, steps descend to the floor below
+      if (meta.stair) addStairs(r, c, rw, rh, meta.stair, stairMat, SLAB - (meta.stair.height ?? H / MM) * MM);
+      continue;
+    }
+    // slab raised above the wall base: floor surface at +slab, wood-textured
+    addBox(c, c + rw, 0, SLAB, r, r + rh, floorMat(zoneTex, rw, rh, flat ?? meta.color));
+    if (meta.stair) addStairs(r, c, rw, rh, meta.stair, stairMat, SLAB);
+  }
+  const wallBox = (x1, y1, x2, y2) => {
+    const [xa, xb] = y1 === y2 ? [x1 - T / 2, x2 + T / 2] : [x1 - T / 2, x1 + T / 2];
+    const [za, zb] = y1 === y2 ? [y1 - T / 2, y1 + T / 2] : [y1 - T / 2, y2 + T / 2];
+    addBox(xa, xb, 0, H, za, zb, wallMat);
+  };
+  for (const [sx1, sy1, sx2, sy2, e] of segments(walls, wallDefs)) {
+    const { kind, bottom = 0, top = H / MM } = wallDefs[e];
+    // opening clear width = span - wall_thickness per end (jambs are wall)
+    const inset = kind === "wall" ? null : insetSeg(sx1, sy1, sx2, sy2, T / 2);
+    if (!inset) {
+      wallBox(sx1, sy1, sx2, sy2);
+      continue;
+    }
+    const [x1, y1, x2, y2] = inset;
+    wallBox(sx1, sy1, x1, y1);
+    wallBox(x2, y2, sx2, sy2);
+    const [xa, xb] = y1 === y2 ? [x1, x2] : [x1 - T / 2, x1 + T / 2];
+    const [za, zb] = y1 === y2 ? [y1 - T / 2, y1 + T / 2] : [y1, y2];
+    const [lo, hi] = [bottom * MM, top * MM];
+    if (lo > 0) addBox(xa, xb, 0, lo, za, zb, wallMat);
+    if (hi < H) addBox(xa, xb, hi, H, za, zb, wallMat);
+    if (kind !== "door") addBox(xa, xb, lo, hi, za, zb, glassMat);
+  }
+}
+
+async function build3d(doc, belowDoc = null) {
+  const gen = ++build3dGen;
+  const texs = await loadFloorTextures(belowDoc ? [doc, belowDoc] : [doc]);
+  if (gen !== build3dGen) return; // superseded while loading
+  model3d.clear();
+  if (belowDoc) {
+    setDims(belowDoc.cfg);
+    const belowH = H; // remember lower floor's wall height
+    buildGroup = new THREE.Group();
+    buildFloor(belowDoc, texs);
+    setDims(doc.cfg);
+    // overlap the upper slab into the lower walls so the facade reads continuous
+    buildGroup.position.y = -belowH;
+    model3d.add(buildGroup);
+  }
+  setDims(doc.cfg);
+  buildGroup = new THREE.Group();
+  buildFloor(doc, texs);
+  model3d.add(buildGroup);
+  if (!camInitialized) {
+    const bb = new THREE.Box3().setFromObject(model3d);
+    if (!bb.isEmpty()) {
+      const ctr = bb.getCenter(new THREE.Vector3());
+      // orbit around the plan center at floor level — natural pivot for a house
+      controls.target.set(ctr.x, 0, ctr.z);
+      const span = Math.max(bb.max.x - bb.min.x, bb.max.z - bb.min.z);
+      // view from the south (same orientation as the 2D plan), ~35° down
+      camera.position.set(ctr.x, span * 0.85, ctr.z + span * 1.2);
+      camInitialized = true;
+    }
+  }
+}
+
+// --- rendering mode panel (bottom-right of the 3D view) ---
+let renderMode = "quality";
+let pathTracer = null, rtReady = false;
+
+async function initPathTracer() {
+  try {
+    if (!pathTracer) {
+      const mod = await import("https://esm.sh/three-gpu-pathtracer@0.0.23?deps=three@0.170.0");
+      pathTracer = new mod.WebGLPathTracer(renderer);
+      pathTracer.bounces = 5;
+    }
+    scene.environment = rtEnv;
+    pathTracer.setScene(scene, camera);
+    rtReady = true;
+  } catch (e) {
+    err.textContent = `path tracer unavailable: ${e.message ?? e}`;
+    renderMode = "quality";
+    applyRenderMode();
+  }
+}
+
+function applyRenderMode() {
+  rtReady = false;
+  renderer.shadowMap.enabled = renderMode !== "fast";
+  scene.environment = renderMode === "fast" ? null : renderMode === "rt" ? rtEnv : envTex;
+  ambient.intensity = renderMode === "fast" ? 1.6 : 0.15;
+  renderer.toneMapping = renderMode === "fast" ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping;
+  model3d.traverse(o => { if (o.isMesh) o.material.needsUpdate = true; });
+  if (renderMode === "rt") initPathTracer();
+}
+
+function rtRefresh() { // call when scene content changed
+  if (renderMode === "rt") initPathTracer();
+}
+
+controls.addEventListener("change", () => {
+  if (renderMode === "rt" && rtReady) pathTracer.updateCamera();
+});
+
+{
+  const panel = document.getElementById("panel3d");
+  const label = document.createElement("span");
+  label.textContent = "rendering ";
+  const sel = document.createElement("select");
+  for (const [v, lab] of [["fast", "Fast"], ["quality", "Quality"], ["rt", "Ray traced"]]) {
+    const o = document.createElement("option");
+    o.value = v; o.textContent = lab;
+    sel.appendChild(o);
+  }
+  sel.value = renderMode;
+  sel.onchange = () => { renderMode = sel.value; applyRenderMode(); };
+  panel.append(label, sel);
+}
+
+// --- UI wiring ---
+const FILES = { "1f": "1f.toml", "2f": "2f.toml" };
+const texts = { "1f": "", "2f": "" };
+let floor = "1f";
+
+const preview = document.getElementById("preview");
+const err = document.getElementById("err");
+const dirStatus = document.getElementById("dirStatus");
+
+function update() {
+  texts[floor] = view.state.doc.toString();
+  if (!texts[floor].trim()) { preview.innerHTML = ""; return; }
+  try {
+    const doc = loadDoc(texts[floor]);
+    preview.innerHTML = renderSvg(doc);
+    let below = null;
+    if (floor === "2f" && texts["1f"].trim()) {
+      try { below = loadDoc(texts["1f"]); } catch { /* 1f broken: show 2f alone */ }
+    }
+    build3d(doc, below).then(() => rtRefresh());
+    err.textContent = "";
+  } catch (e) {
+    err.textContent = String(e.message ?? e);
+  }
+}
+
+const onChange = EditorView.updateListener.of(u => { if (u.docChanged) update(); });
+const view = new EditorView({
+  doc: "click `open folder` and pick the meguro-house directory (or serve via http)",
+  parent: document.getElementById("ed"),
+  extensions: [vim(), basicSetup, onChange],
+});
+
+function setDoc(text) {
+  view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
+}
+
+for (const f of ["1f", "2f"]) {
+  document.getElementById("tab" + f).onclick = () => {
+    texts[floor] = view.state.doc.toString();
+    floor = f;
+    document.getElementById("tab1f").classList.toggle("active", f === "1f");
+    document.getElementById("tab2f").classList.toggle("active", f === "2f");
+    setDoc(texts[f]);
+  };
+}
+
+// --- file access: File System Access API, or fetch() when served over http ---
+let dir = null;
+let reader = null; // how to (re)read files — set by open folder or http load
+
+const dirReader = async name => (await (await dir.getFileHandle(name)).getFile()).text();
+const httpReader = async name => {
+  const r = await fetch(name, { cache: "no-store" });
+  if (!r.ok) throw new Error(`fetch ${name}: ${r.status}`);
+  return r.text();
+};
+
+async function loadAll() {
+  for (const f of ["1f", "2f"]) texts[f] = await reader(FILES[f]);
+  setDoc(texts[floor]);
+}
+
+document.getElementById("openDir").onclick = async () => {
+  if (!window.showDirectoryPicker) {
+    err.textContent = "File System Access API unavailable — use Chrome/Edge, or serve via `python3 -m http.server`";
+    return;
+  }
+  try {
+    dir = await showDirectoryPicker({ mode: "readwrite" });
+  } catch { return; }
+  reader = dirReader;
+  await loadAll();
+  dirStatus.textContent = `${dir.name}/ — :w saves`;
+};
+
+document.getElementById("reload").onclick = async () => {
+  if (!reader) { err.textContent = "nothing to reload — open folder first"; return; }
+  try {
+    await loadAll();
+    dirStatus.textContent = "reloaded ✓";
+    setTimeout(() => { dirStatus.textContent = dir ? `${dir.name}/ — :w saves` : ""; }, 1500);
+  } catch (e) { err.textContent = String(e.message ?? e); }
+};
+
+document.getElementById("save").onclick = () => saveAll();
+
+if (location.protocol.startsWith("http")) {
+  reader = httpReader;
+  loadAll()
+    .then(() => { dirStatus.textContent = "loaded via http (:w needs open folder)"; })
+    .catch(e => { err.textContent = String(e.message ?? e); });
+}
+
+async function saveAll() {
+  if (!dir) { err.textContent = "no folder opened — click `open folder` first"; return; }
+  texts[floor] = view.state.doc.toString();
+  const fh = await dir.getFileHandle(FILES[floor], { create: true });
+  const w = await fh.createWritable();
+  await w.write(texts[floor]);
+  await w.close();
+  dirStatus.textContent = `saved ${FILES[floor]} ✓`;
+  setTimeout(() => { dirStatus.textContent = `${dir.name}/ — :w saves`; }, 1500);
+}
+
+Vim.defineEx("write", "w", () => { saveAll(); });
+window.addEventListener("keydown", e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "s") { e.preventDefault(); saveAll(); }
+});
+</script>
+</body>
+</html>
