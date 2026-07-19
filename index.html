@@ -209,7 +209,21 @@ function renderSvg({ zone, walls, zones, wallDefs, cfg }) {
   const rects = zoneRects(zone);
   for (const [r, c, rw, rh, e] of rects) {
     const fill = zones[e].outside ? "#eee" : zones[e].hole ? "#f7f7f7" : "#fff";
-    svg += `  <rect x="${px(c)}" y="${px(r)}" width="${px(rw)}" height="${px(rh)}" fill="${fill}" stroke="#ddd" stroke-width="1"/>\n`;
+    svg += `  <rect x="${px(c)}" y="${px(r)}" width="${px(rw)}" height="${px(rh)}" fill="${fill}"/>\n`;
+  }
+  // boundaries only where the zone actually changes (no seams inside L-shaped zones)
+  svg += `</g>\n<g id="zone-borders" stroke="#ccc" stroke-width="1">\n`;
+  {
+    const rows = zone.length, cols = zone[0].length;
+    const hB = [], vB = [];
+    for (let r = 0; r < rows; r++) for (let c = 0; c < cols - 1; c++)
+      if (zone[r][c] !== zone[r][c + 1]) vB.push([c + 1, r, r + 1]);
+    for (let r = 0; r < rows - 1; r++) for (let c = 0; c < cols; c++)
+      if (zone[r][c] !== zone[r + 1][c]) hB.push([r + 1, c, c + 1]);
+    for (const [x, y1, y2] of merge(vB))
+      svg += `  <line x1="${px(x)}" y1="${px(y1)}" x2="${px(x)}" y2="${px(y2)}"/>\n`;
+    for (const [y, x1, x2] of merge(hB))
+      svg += `  <line x1="${px(x1)}" y1="${px(y)}" x2="${px(x2)}" y2="${px(y)}"/>\n`;
   }
   svg += `</g>\n<g id="walls" stroke-linecap="square" fill="none">\n`;
   for (const [sx1, sy1, sx2, sy2, e] of segments(walls, wallDefs)) {
