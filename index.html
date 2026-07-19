@@ -525,8 +525,8 @@ async function build3d(doc, belowDoc = null) {
       // orbit around the plan center at floor level — natural pivot for a house
       controls.target.set(ctr.x, 0, ctr.z);
       const span = Math.max(bb.max.x - bb.min.x, bb.max.z - bb.min.z);
-      // view from the south (same orientation as the 2D plan), ~35° down
-      camera.position.set(ctr.x, span * 0.85, ctr.z + span * 1.2);
+      // view from the south-east (slightly right of the 2D plan orientation)
+      camera.position.set(ctr.x + span * 0.45, span * 0.8, ctr.z + span * 1.05);
       camInitialized = true;
     }
   }
