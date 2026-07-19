@@ -16,11 +16,15 @@
   main { flex: 1; display: flex; min-height: 0; }
   .editors { width: 40%; display: flex; flex-direction: column; min-width: 280px; }
   .cm-wrap { flex: 1; overflow: auto; }
+  .divider-v { width: 5px; cursor: col-resize; background: #333; flex: none; }
+  .divider-h { height: 5px; cursor: row-resize; background: #333; flex: none; }
+  .divider-v:hover, .divider-h:hover { background: var(--accent); }
   .cm-editor { height: 100%; font-size: 15px; }
   .views { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-  #preview { flex: 1; overflow: auto; background: #fff; display: flex; align-items: flex-start; justify-content: center; padding: 20px; min-height: 0; }
+  #preview { flex: 1; overflow: hidden; background: #fff; display: flex; align-items: center; justify-content: center; padding: 12px; min-height: 0; }
+  #preview svg { max-width: 100%; max-height: 100%; width: auto; height: auto; }
   #view3d { flex: 1; min-height: 0; position: relative; }
-  #view3d canvas { position: absolute; inset: 0; }
+  #view3d canvas { position: absolute; inset: 0; width: 100% !important; height: 100% !important; }
   #panel3d { position: absolute; z-index: 10; right: 8px; bottom: 8px; background: rgba(30,30,30,0.85); padding: 8px 10px; font-size: 12px; border: 1px solid #444; border-radius: 4px; max-height: 60%; overflow-y: auto; }
   #panel3d .row { display: flex; align-items: center; gap: 6px; margin: 2px 0; }
   #panel3d .row span { min-width: 90px; }
@@ -43,8 +47,10 @@
   <div class="editors">
     <div class="cm-wrap" id="ed"></div>
   </div>
+  <div class="divider-v" id="dragV"></div>
   <div class="views">
     <div id="preview"></div>
+    <div class="divider-h" id="dragH"></div>
     <div id="view3d"><div id="panel3d"></div></div>
   </div>
 </main>
@@ -321,14 +327,16 @@ scene.add(ambient);
 const model3d = new THREE.Group();
 scene.add(model3d);
 
+
 function resize3d() {
   const { clientWidth: w, clientHeight: h } = view3d;
   if (!w || !h) return;
-  renderer.setSize(w, h, false);
+  renderer.setSize(w, h);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
 }
 new ResizeObserver(resize3d).observe(view3d);
+view3d.addEventListener("dblclick", () => fitView()); // recenter any time
 renderer.setAnimationLoop(() => {
   controls.update();
   if (renderMode === "rt" && rtReady) pathTracer.renderSample();
@@ -518,18 +526,23 @@ async function build3d(doc, belowDoc = null) {
   buildGroup = new THREE.Group();
   buildFloor(doc, texs);
   model3d.add(buildGroup);
-  if (!camInitialized) {
-    const bb = new THREE.Box3().setFromObject(model3d);
-    if (!bb.isEmpty()) {
-      const ctr = bb.getCenter(new THREE.Vector3());
-      // orbit around the plan center at floor level — natural pivot for a house
-      controls.target.set(ctr.x, 0, ctr.z);
-      const span = Math.max(bb.max.x - bb.min.x, bb.max.z - bb.min.z);
-      // view from the south-east (slightly right of the 2D plan orientation)
-      camera.position.set(ctr.x + span * 0.45, span * 0.8, ctr.z + span * 1.05);
-      camInitialized = true;
-    }
-  }
+  if (!camInitialized && fitView()) camInitialized = true;
+}
+
+// aim at the building center and back off just far enough to fit it all in view
+function fitView() {
+  resize3d(); // make sure camera.aspect matches the canvas before computing fit
+  const bb = new THREE.Box3().setFromObject(model3d);
+  if (bb.isEmpty()) return false;
+  const ctr = bb.getCenter(new THREE.Vector3());
+  controls.target.copy(ctr);
+  const sphere = bb.getBoundingSphere(new THREE.Sphere());
+  const fovV = camera.fov * Math.PI / 180;
+  const fovH = 2 * Math.atan(Math.tan(fovV / 2) * camera.aspect);
+  const dist = sphere.radius / Math.sin(Math.min(fovV, fovH) / 2);
+  const dir = new THREE.Vector3(0, 1, 0.08).normalize(); // straight above the pin (tiny tilt so orbit stays stable)
+  camera.position.copy(ctr).addScaledVector(dir, dist);
+  return true;
 }
 
 // --- rendering mode panel (bottom-right of the 3D view) ---
@@ -586,6 +599,28 @@ controls.addEventListener("change", () => {
   panel.append(label, sel);
   applyRenderMode(); // start in the default mode
 }
+
+// --- draggable pane dividers ---
+function makeDraggable(divider, target, horizontal) {
+  divider.addEventListener("mousedown", e => {
+    e.preventDefault();
+    const start = horizontal ? e.clientY : e.clientX;
+    const size0 = horizontal ? target.getBoundingClientRect().height : target.getBoundingClientRect().width;
+    const move = ev => {
+      const d = (horizontal ? ev.clientY : ev.clientX) - start;
+      target.style.flex = "none";
+      target.style[horizontal ? "height" : "width"] = `${Math.max(80, size0 + d)}px`;
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  });
+}
+makeDraggable(document.getElementById("dragV"), document.querySelector(".editors"), false);
+makeDraggable(document.getElementById("dragH"), document.getElementById("preview"), true);
 
 // --- UI wiring ---
 const FILES = { "1f": "1f.toml", "2f": "2f.toml" };
