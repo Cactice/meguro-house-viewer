@@ -48,6 +48,7 @@ outside = true
 [zones."🟥"]
 name = "トイレ"
 color = "#e74c3c"
+floor = "assets/textures/tile_white.jpg"
 
 [zones."🟧"]
 name = "階段"
