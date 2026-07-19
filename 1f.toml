@@ -48,7 +48,7 @@ outside = true
 [zones."🌀"]
 name = "洗濯機"
 color = "#16a085"
-floor = "#f2f2f2"
+floor = "assets/textures/tile_white.jpg"
 
 [zones."🟧"]
 name = "階段"
@@ -62,12 +62,12 @@ color = "#dfe6e9"
 [zones."🛁"]
 name = "浴槽"
 color = "#2e86c1"
-floor = "#f2f2f2"
+floor = "assets/textures/tile_white.jpg"
 
 [zones."🚿"]
 name = "洗い場"
 color = "#85c1e9"
-floor = "#f2f2f2"
+floor = "assets/textures/tile_white.jpg"
 
 [zones."🟨"]
 name = "玄関"
@@ -80,7 +80,7 @@ color = "#c9a66b"
 [zones."🚽"]
 name = "トイレ"
 color = "#e74c3c"
-floor = "#f2f2f2"
+floor = "assets/textures/tile_white.jpg"
 
 [zones."🪥"]
 name = "洗面所"
